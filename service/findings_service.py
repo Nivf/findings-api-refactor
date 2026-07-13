@@ -1,9 +1,12 @@
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from database.models import FindingStatus
 from store.findings_store import FindingNotFoundError, FindingsStore
+
+logger = logging.getLogger(__name__)
 
 
 class InvalidFindingsQueryError(ValueError):
@@ -12,6 +15,10 @@ class InvalidFindingsQueryError(ValueError):
 
 class InvalidFindingStatusTransitionError(ValueError):
     pass
+
+
+class InvalidStatusUpdateRequestError(ValueError):
+    """Raised on bad input -- lets the API layer return 400, not 500."""
 
 
 DEFAULT_DELTA_HOURS = 24
@@ -55,6 +62,22 @@ class FindingsResult:
 
 
 @dataclass
+class UpdateStatusRequest:
+    """Request parameters for a batch status update, validated on
+    construction -- same pattern as FindingsQuery."""
+
+    finding_ids: List[str]
+    new_status: str
+
+    def __post_init__(self):
+        if not isinstance(self.finding_ids, list) or not self.finding_ids:
+            raise InvalidStatusUpdateRequestError("finding_ids must be a non-empty list")
+        if self.new_status not in {s.value for s in FindingStatus}:
+            valid = sorted(s.value for s in FindingStatus)
+            raise InvalidStatusUpdateRequestError(f"status must be one of {valid}")
+
+
+@dataclass
 class UpdateStatusResult:
     updated: List[str] = field(default_factory=list)
     failed: List[str] = field(default_factory=list)
@@ -90,20 +113,22 @@ class FindingsService:
             page_size=query.page_size,
         )
 
-    def update_statuses(self, finding_ids: List[str], new_status: str) -> UpdateStatusResult:
-        """Updates a batch of findings to `new_status`. All-or-nothing: if
-        any finding is missing or fails the transition rule, nothing in
-        the batch is committed."""
-        finding_ids = list(finding_ids)
-
+    def update_statuses(self, request: UpdateStatusRequest) -> UpdateStatusResult:
+        """Updates a batch of findings to `request.new_status`. All-or-
+        nothing: if any finding is missing or fails the transition rule,
+        nothing in the batch is committed."""
         try:
             with self._findings_store.begin_transaction() as tx:
-                for finding_id in finding_ids:
+                for finding_id in request.finding_ids:
                     finding = tx.get_finding(finding_id)
-                    validate_finding_status_transition(finding.status, new_status)
-                    finding.status = new_status
+                    validate_finding_status_transition(finding.status, request.new_status)
+                    finding.status = request.new_status
                     tx.save_finding(finding)
-        except (FindingNotFoundError, InvalidFindingStatusTransitionError):
-            return UpdateStatusResult(updated=[], failed=finding_ids)
+        except (FindingNotFoundError, InvalidFindingStatusTransitionError) as exc:
+            logger.warning(
+                "rolled back status update to %r for finding_ids=%s: %s: %s",
+                request.new_status, request.finding_ids, type(exc).__name__, exc,
+            )
+            return UpdateStatusResult(updated=[], failed=request.finding_ids)
 
-        return UpdateStatusResult(updated=finding_ids, failed=[])
+        return UpdateStatusResult(updated=request.finding_ids, failed=[])

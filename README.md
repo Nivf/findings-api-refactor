@@ -34,9 +34,13 @@ pytest
 
 ## Structure
 
-- `app.py` — Flask route + request parsing/validation.
+- `app.py` — Flask routes; delegates parsing to `FindingsRequestParser` and
+  work to `FindingsService`, both injected via `create_app(...)`.
+- `request_parser.py` — turns raw HTTP request data into validated
+  request objects, independent of Flask (testable without a test client).
 - `service/findings_service.py` — orchestration, request/response DTOs.
 - `store/findings_store.py` — persistence interface + SQLAlchemy
   implementation.
 - `database/` — SQLAlchemy models and session setup.
-- `tests/` — unit tests against a fake store (no DB needed).
+- `tests/` — unit tests against a fake store and a fake request (no DB,
+  no Flask app needed).

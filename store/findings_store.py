@@ -167,7 +167,7 @@ class _SqlAlchemyFindingsTransaction(FindingsTransaction):
     def get_finding(self, finding_id: str) -> FindingDBModel:
         finding = self._session.get(FindingDBModel, finding_id)
         if finding is None:
-            raise FindingNotFoundError(finding_id)
+            raise FindingNotFoundError(f"no finding with id {finding_id!r}")
         return finding
 
     def save_finding(self, finding: FindingDBModel) -> None:

@@ -4,6 +4,8 @@ from service.findings_service import (
     FindingsQuery,
     FindingsService,
     InvalidFindingsQueryError,
+    InvalidStatusUpdateRequestError,
+    UpdateStatusRequest,
 )
 from store.findings_store import (
     FindingNotFoundError,
@@ -135,11 +137,25 @@ def test_rejects_invalid_query_params(kwargs):
         FindingsQuery(**kwargs)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"finding_ids": [], "new_status": "completed"},
+        {"finding_ids": None, "new_status": "completed"},
+        {"finding_ids": "f1", "new_status": "completed"},  # a string, not a list
+        {"finding_ids": ["f1"], "new_status": "not-a-real-status"},
+    ],
+)
+def test_rejects_invalid_update_status_request(kwargs):
+    with pytest.raises(InvalidStatusUpdateRequestError):
+        UpdateStatusRequest(**kwargs)
+
+
 def test_update_statuses_happy_path():
     store = FakeFindingsStore(findings=[FakeFinding("f1", "pending"), FakeFinding("f2", "pending")])
     service = FindingsService(store)
 
-    result = service.update_statuses(["f1", "f2"], "completed")
+    result = service.update_statuses(UpdateStatusRequest(["f1", "f2"], "completed"))
 
     assert result.updated == ["f1", "f2"]
     assert result.failed == []
@@ -153,7 +169,7 @@ def test_update_statuses_is_all_or_nothing_on_invalid_transition():
     )
     service = FindingsService(store)
 
-    result = service.update_statuses(["f1", "f2"], "in_review")
+    result = service.update_statuses(UpdateStatusRequest(["f1", "f2"], "in_review"))
 
     assert result.updated == []
     assert result.failed == ["f1", "f2"]
@@ -167,8 +183,20 @@ def test_update_statuses_rolls_back_on_missing_finding():
     store = FakeFindingsStore(findings=[FakeFinding("f1", "pending")])
     service = FindingsService(store)
 
-    result = service.update_statuses(["f1", "does-not-exist"], "completed")
+    result = service.update_statuses(UpdateStatusRequest(["f1", "does-not-exist"], "completed"))
 
     assert result.updated == []
     assert result.failed == ["f1", "does-not-exist"]
     assert store.committed["f1"].status == "pending"
+
+
+def test_completed_finding_can_be_re_completed():
+    # Boundary case: COMPLETED -> COMPLETED is a no-op transition, not
+    # blocked by the same rule that blocks COMPLETED -> anything else.
+    store = FakeFindingsStore(findings=[FakeFinding("f1", "completed")])
+    service = FindingsService(store)
+
+    result = service.update_statuses(UpdateStatusRequest(["f1"], "completed"))
+
+    assert result.updated == ["f1"]
+    assert result.failed == []
