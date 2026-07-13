@@ -18,6 +18,12 @@ version for readability, testability, and correctness. Refactor highlights:
   wrapped in a single all-or-nothing transaction (SQLAlchemy's
   `Session.begin()`) -- if any finding in the batch is missing or fails
   the status-transition rule, nothing in the batch is committed.
+- Request parsing runs as a decorator around each view (`@parsed(...)`)
+  instead of inline at the top of the view body -- a parsing/validation
+  failure is handled in one place and turned into a 400 before the view
+  ever runs; views only ever receive an already-valid request object.
+- Rollback reasons are logged server-side (which finding_ids, target
+  status, and the specific error) instead of failing silently.
 
 ## Endpoints
 
@@ -42,5 +48,6 @@ pytest
 - `store/findings_store.py` — persistence interface + SQLAlchemy
   implementation.
 - `database/` — SQLAlchemy models and session setup.
-- `tests/` — unit tests against a fake store and a fake request (no DB,
-  no Flask app needed).
+- `tests/` — unit tests against a fake store and a fake request (no DB
+  needed), plus `test_app.py` exercising the real Flask app end-to-end
+  via its test client.
