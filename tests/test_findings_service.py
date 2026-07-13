@@ -1,14 +1,63 @@
 import pytest
 
-from service.findings_service import FindingsQuery, FindingsService, InvalidFindingsQueryError
-from store.findings_store import FindingsPage, FindingsStore, FindingSummary
+from service.findings_service import (
+    FindingsQuery,
+    FindingsService,
+    InvalidFindingsQueryError,
+)
+from store.findings_store import (
+    FindingNotFoundError,
+    FindingsPage,
+    FindingsStore,
+    FindingsTransaction,
+    FindingSummary,
+)
+
+
+class FakeFinding:
+    def __init__(self, finding_id, status):
+        self.finding_id = finding_id
+        self.status = status
+
+    def clone(self):
+        return FakeFinding(self.finding_id, self.status)
+
+
+class FakeFindingsTransaction(FindingsTransaction):
+    """In-memory stand-in for _SqlAlchemyFindingsTransaction: stages
+    clones of committed findings, and only promotes them on a clean exit --
+    same all-or-nothing contract as the real one."""
+
+    def __init__(self, store):
+        self._store = store
+        self._pending = None
+
+    def __enter__(self):
+        self._pending = {fid: f.clone() for fid, f in self._store.committed.items()}
+        return self
+
+    def get_finding(self, finding_id):
+        finding = self._pending.get(finding_id)
+        if finding is None:
+            raise FindingNotFoundError(finding_id)
+        return finding
+
+    def save_finding(self, finding) -> None:
+        self._pending[finding.finding_id] = finding
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self._store.committed = self._pending
+        self._pending = None
+        return False
 
 
 class FakeFindingsStore(FindingsStore):
     """Proves the DI payoff: FindingsService is testable with zero DB."""
 
-    def __init__(self, page: FindingsPage):
+    def __init__(self, page: FindingsPage = None, findings=None):
         self.page = page
+        self.committed = {f.finding_id: f for f in (findings or [])}
         self.last_call = None
 
     def get_findings(self, cutoff_time, algorithm_type, min_findings, exclude_statuses, offset, limit):
@@ -21,6 +70,9 @@ class FakeFindingsStore(FindingsStore):
             limit=limit,
         )
         return self.page
+
+    def begin_transaction(self) -> FindingsTransaction:
+        return FakeFindingsTransaction(self)
 
 
 def make_summary(finding_id="f1", status="pending"):
@@ -81,3 +133,42 @@ def test_result_reports_true_total_not_just_page_length():
 def test_rejects_invalid_query_params(kwargs):
     with pytest.raises(InvalidFindingsQueryError):
         FindingsQuery(**kwargs)
+
+
+def test_update_statuses_happy_path():
+    store = FakeFindingsStore(findings=[FakeFinding("f1", "pending"), FakeFinding("f2", "pending")])
+    service = FindingsService(store)
+
+    result = service.update_statuses(["f1", "f2"], "completed")
+
+    assert result.updated == ["f1", "f2"]
+    assert result.failed == []
+    assert store.committed["f1"].status == "completed"
+    assert store.committed["f2"].status == "completed"
+
+
+def test_update_statuses_is_all_or_nothing_on_invalid_transition():
+    store = FakeFindingsStore(
+        findings=[FakeFinding("f1", "pending"), FakeFinding("f2", "completed")]
+    )
+    service = FindingsService(store)
+
+    result = service.update_statuses(["f1", "f2"], "in_review")
+
+    assert result.updated == []
+    assert result.failed == ["f1", "f2"]
+    # f1 must NOT be committed even though it was valid on its own --
+    # the whole batch rolled back because f2 failed.
+    assert store.committed["f1"].status == "pending"
+    assert store.committed["f2"].status == "completed"
+
+
+def test_update_statuses_rolls_back_on_missing_finding():
+    store = FakeFindingsStore(findings=[FakeFinding("f1", "pending")])
+    service = FindingsService(store)
+
+    result = service.update_statuses(["f1", "does-not-exist"], "completed")
+
+    assert result.updated == []
+    assert result.failed == ["f1", "does-not-exist"]
+    assert store.committed["f1"].status == "pending"

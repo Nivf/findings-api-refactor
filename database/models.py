@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
@@ -7,10 +7,12 @@ from sqlalchemy.orm import declarative_base, relationship
 Base = declarative_base()
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class FindingStatus(str, Enum):
-    """Type-safe status values -- replaces magic strings like "completed"
-    scattered across the service/store layers (same fix as ARCHIVED_STATUS
-    in the ScanReportService exercise)."""
+    """Type-safe status values."""
 
     PENDING = "pending"
     COMPLETED = "completed"
@@ -20,11 +22,11 @@ class FindingStatus(str, Enum):
 class PatientDBModel(Base):
     __tablename__ = "patients"
 
-    patient_id = Column(String, primary_key=True)  # identifier from the source system
+    patient_id = Column(String, primary_key=True)  # source-system identifier
     patient_name = Column(String, nullable=False)
     patient_age = Column(Integer, nullable=True)
     patient_gender = Column(String, nullable=True)
-    creation_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    creation_date = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     studies = relationship("StudyDBModel", back_populates="patient")
 
@@ -34,11 +36,11 @@ class StudyDBModel(Base):
 
     __tablename__ = "studies"
 
-    accession_number = Column(String, primary_key=True)  # study's unique identifier from the source system
+    accession_number = Column(String, primary_key=True)  # source-system identifier
     patient_id = Column(String, ForeignKey("patients.patient_id"), nullable=False, index=True)
-    study_date = Column(DateTime, nullable=False)
+    study_date = Column(DateTime(timezone=True), nullable=False)
     modality = Column(String, nullable=True)
-    creation_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    creation_date = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     patient = relationship("PatientDBModel", back_populates="studies")
     findings = relationship("FindingDBModel", back_populates="study")
@@ -55,10 +57,7 @@ class FindingDBModel(Base):
     num_findings = Column(Integer, default=0, nullable=False)
     status = Column(String, default=FindingStatus.PENDING.value, nullable=False)
     is_removed = Column(Boolean, default=False, nullable=False)
-    # Missing feature #2 (beyond pagination): every /api/findings call filters
-    # on creation_date >= cutoff_time with no index backing it -- on a real
-    # findings table this is a full scan under load. Added here.
-    creation_date = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    last_update_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    creation_date = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)  # queried on every request
+    last_update_date = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     study = relationship("StudyDBModel", back_populates="findings")

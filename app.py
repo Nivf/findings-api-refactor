@@ -3,19 +3,21 @@ import logging
 
 from flask import Flask, jsonify, request
 
-from service.findings_service import FindingsQuery, FindingsService, InvalidFindingsQueryError
+from database.models import FindingStatus
+from service.findings_service import (
+    FindingsQuery,
+    FindingsService,
+    InvalidFindingsQueryError,
+)
 from store.findings_store import SqlAlchemyFindingsStore
 
 logger = logging.getLogger(__name__)
+VALID_STATUSES = {s.value for s in FindingStatus}
 
 
-# App factory instead of a module-level `app`/`findings_service` built at
-# import time. That original pattern meant importing app.py had the side
-# effect of constructing a real FindingsService(FindingsStore()) wired to a
-# real DB -- so no test could import the route handlers without a live DB
-# connection. This makes findings_service an injected dependency, same DI
-# pattern as everywhere else, and lets tests build a Flask test client
-# around a fake FindingsService.
+# App factory -- avoids building a real FindingsService (and its DB
+# connection) at import time, so route handlers can be tested with a fake
+# service and no live database.
 def create_app(findings_service: FindingsService) -> Flask:
     app = Flask(__name__)
 
@@ -24,9 +26,6 @@ def create_app(findings_service: FindingsService) -> Flask:
         try:
             query = _parse_query(request)
         except InvalidFindingsQueryError as exc:
-            # Was previously indistinguishable from a real server bug --
-            # both fell into the bare `except Exception` below and came
-            # back as a 500. A bad request is a 400.
             return jsonify({"error": str(exc)}), 400
 
         logger.info(
@@ -37,31 +36,39 @@ def create_app(findings_service: FindingsService) -> Flask:
         try:
             result = findings_service.get_findings(query)
         except Exception:
-            # Log the full exception server-side; never return str(e) to
-            # the caller -- the original code did, which can leak internal
-            # details (table/column names, stack fragments) to any client.
-            # Worth flagging extra hard here: this endpoint returns patient
-            # name/age/gender with no auth/authorization check visible
-            # anywhere in this codebase. That's a bigger gap than this
-            # refactor can respond to (needs a real auth story), but it's
-            # exactly the kind of thing to say out loud in an interview on
-            # a healthcare-data codebase.
+            # Log full details server-side; never return them to the client.
             logger.exception("failed to fetch findings")
             return jsonify({"error": "Internal server error"}), 500
 
         return jsonify(dataclasses.asdict(result)), 200
 
+    @app.route("/api/findings/status", methods=["POST"])
+    def update_findings_status():
+        body = request.get_json(silent=True) or {}
+        finding_ids = body.get("finding_ids")
+        new_status = body.get("status")
+
+        if not isinstance(finding_ids, list) or not finding_ids:
+            return jsonify({"error": "finding_ids must be a non-empty list"}), 400
+        if new_status not in VALID_STATUSES:
+            return jsonify({"error": f"status must be one of {sorted(VALID_STATUSES)}"}), 400
+
+        try:
+            result = findings_service.update_statuses(finding_ids, new_status)
+        except Exception:
+            logger.exception("failed to update finding statuses")
+            return jsonify({"error": "Internal server error"}), 500
+
+        # All-or-nothing: any failure means nothing in the batch committed.
+        status_code = 200 if not result.failed else 409
+        return jsonify(dataclasses.asdict(result)), status_code
+
     return app
 
 
 def _parse_query(req) -> FindingsQuery:
-    # "2. validate input" -- Flask's `type=int` bug: request.args.get(...,
-    # type=int) does NOT raise on a bad value like "abc"; it silently
-    # returns None, which then falls through to the default. A caller who
-    # typos delta_time gets no error at all and unknowingly gets the
-    # default 24h window instead of what they asked for. Parsing manually
-    # here so bad input is a 400, not silent wrong behavior -- this is the
-    # "another missing bug, like pagination" gap.
+    # request.args.get(key, type=int) returns None on invalid input
+    # instead of raising, so we parse manually to surface a 400.
     kwargs = {}
 
     raw_delta = request.args.get("delta_time")

@@ -1,15 +1,18 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable, List, Optional
+from typing import Callable, ContextManager, List, Optional
 
 from database.models import FindingDBModel, PatientDBModel, StudyDBModel
 
 
+class FindingNotFoundError(Exception):
+    pass
+
+
 @dataclass
 class FindingSummary:
-    """Response shape for one finding -- replaces the raw dict literal
-    ("Add to Data Model" comment)."""
+    """Response shape for one finding."""
 
     prediction_id: str
     accession_number: str
@@ -25,18 +28,38 @@ class FindingSummary:
 
 @dataclass
 class FindingsPage:
-    """A page of results plus the TRUE total across all pages -- not just
-    len(this page), which is what the original `total_count` actually
-    measured once pagination exists."""
+    """A page of results, plus the total count across the whole filtered
+    set (not just this page)."""
 
     items: List[FindingSummary]
     total_count: int
 
 
-# Dependency Inversion Principle (DIP): FindingsService depends on this
-# interface, not on SqlAlchemyFindingsStore directly -- same pattern as
-# ReportRepository in the ScanReportService exercise. Lets the service be
-# unit-tested with an in-memory fake, no real DB needed.
+class FindingsTransaction(ABC):
+    """Unit of work scoped to one batch of writes. get_finding()/
+    save_finding() calls made through this object all commit together on a
+    clean exit, or none of them do."""
+
+    @abstractmethod
+    def get_finding(self, finding_id: str) -> FindingDBModel:
+        ...
+
+    @abstractmethod
+    def save_finding(self, finding: FindingDBModel) -> None:
+        ...
+
+    @abstractmethod
+    def __enter__(self) -> "FindingsTransaction":
+        ...
+
+    @abstractmethod
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        ...
+
+
+# FindingsService depends on this interface, not on SqlAlchemyFindingsStore
+# directly -- lets the service be unit-tested against an in-memory fake,
+# no real database needed.
 class FindingsStore(ABC):
     @abstractmethod
     def get_findings(
@@ -50,19 +73,23 @@ class FindingsStore(ABC):
     ) -> FindingsPage:
         ...
 
+    @abstractmethod
+    def begin_transaction(self) -> FindingsTransaction:
+        ...
+
 
 class SqlAlchemyFindingsStore(FindingsStore):
     """Real implementation, backed by Postgres/sqlite via SQLAlchemy."""
 
     def __init__(self, session_factory: Callable = None):
-        # Injected rather than imported-and-called directly inside the
-        # method -- same DI lever as everywhere else: tests can hand this a
-        # fake/in-memory session factory instead of touching a real DB.
         if session_factory is None:
             from database.session import get_db_session
 
             session_factory = get_db_session
         self._session_factory = session_factory
+
+    def begin_transaction(self) -> FindingsTransaction:
+        return _SqlAlchemyFindingsTransaction(self._session_factory())
 
     def get_findings(
         self,
@@ -75,10 +102,8 @@ class SqlAlchemyFindingsStore(FindingsStore):
     ) -> FindingsPage:
         session = self._session_factory()
         try:
-            # Single joined query replaces the original per-row nested
-            # queries (1 finding query + 2 extra round-trips PER finding --
-            # classic N+1). All filtering that CAN happen in SQL now does,
-            # instead of fetching everything and discarding rows in Python.
+            # Single joined query -- avoids a separate query per finding
+            # for its study and patient.
             findings_query = (
                 session.query(FindingDBModel, StudyDBModel, PatientDBModel)
                 .join(StudyDBModel, FindingDBModel.accession_number == StudyDBModel.accession_number)
@@ -98,9 +123,7 @@ class SqlAlchemyFindingsStore(FindingsStore):
             if exclude_statuses:
                 findings_query = findings_query.filter(FindingDBModel.status.notin_(exclude_statuses))
 
-            # True total across the whole filtered set, computed before
-            # paging -- this is what makes "total_count" meaningful once
-            # pagination exists, instead of just echoing back page size.
+            # Computed before paging, so it reflects the whole filtered set.
             total_count = findings_query.count()
 
             rows = (
@@ -128,3 +151,39 @@ class SqlAlchemyFindingsStore(FindingsStore):
             return FindingsPage(items=items, total_count=total_count)
         finally:
             session.close()
+
+
+class _SqlAlchemyFindingsTransaction(FindingsTransaction):
+    """Adapts a SQLAlchemy Session's own begin/commit/rollback to the
+    FindingsTransaction interface. No manual staging/rollback logic is
+    needed here -- the Session already tracks changes to objects loaded
+    through it, and `session.begin()` used as a context manager commits on
+    a clean exit or rolls back on an exception."""
+
+    def __init__(self, session):
+        self._session = session
+        self._session_transaction = None
+
+    def get_finding(self, finding_id: str) -> FindingDBModel:
+        finding = self._session.get(FindingDBModel, finding_id)
+        if finding is None:
+            raise FindingNotFoundError(finding_id)
+        return finding
+
+    def save_finding(self, finding: FindingDBModel) -> None:
+        # No-op: `finding` was loaded through this same session, so
+        # SQLAlchemy is already tracking the mutation. Kept so callers
+        # don't need to know that detail.
+        pass
+
+    def __enter__(self) -> FindingsTransaction:
+        self._session_transaction = self._session.begin()
+        self._session_transaction.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        try:
+            self._session_transaction.__exit__(exc_type, exc, tb)
+        finally:
+            self._session.close()
+        return False

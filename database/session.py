@@ -5,9 +5,7 @@ from sqlalchemy.orm import scoped_session, sessionmaker
 
 from database.models import Base
 
-# Was hardcoded ("cert secured config file" comment flagged this correctly)
-# -- connection strings belong in environment/config, not source. Falling
-# back to sqlite only for local/test runs.
+# Connection string belongs in environment/config, not source.
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./coding_exercise.db")
 
 engine = create_engine(DATABASE_URL, echo=False)

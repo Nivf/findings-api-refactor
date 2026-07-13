@@ -14,6 +14,15 @@ version for readability, testability, and correctness. Refactor highlights:
 - Flask app factory (`create_app`) instead of a module-level app built at
   import time.
 - Type-safe `FindingStatus` enum instead of magic status strings.
+- Added `POST /api/findings/status` to update a batch of findings, wrapped
+  in a single all-or-nothing transaction (SQLAlchemy's `Session.begin()`) --
+  if any finding in the batch is missing or fails the status-transition
+  rule, nothing in the batch is committed.
+
+## Endpoints
+
+- `GET /api/findings?delta_time=24&algorithm_type=ich&min_findings=1&page=1&page_size=50`
+- `POST /api/findings/status` — body: `{"finding_ids": ["f1", "f2"], "status": "completed"}`
 
 ## Run
 
