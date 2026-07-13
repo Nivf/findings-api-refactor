@@ -63,8 +63,6 @@ def create_app(findings_service: FindingsService, request_parser: FindingsReques
             return jsonify({"error": "Internal server error"}), 500
 
         # All-or-nothing: any failure means nothing in the batch committed.
-        # The service already logs *why* it rolled back; this just reports
-        # the outcome to the client.
         status_code = 200 if not result.failed else 409
         return jsonify(dataclasses.asdict(result)), status_code
 
