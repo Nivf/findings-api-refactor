@@ -42,7 +42,7 @@ def create_app(findings_service: FindingsService) -> Flask:
 
         return jsonify(dataclasses.asdict(result)), 200
 
-    @app.route("/api/findings/status", methods=["POST"])
+    @app.route("/api/findings", methods=["PATCH"])
     def update_findings_status():
         body = request.get_json(silent=True) or {}
         finding_ids = body.get("finding_ids")
